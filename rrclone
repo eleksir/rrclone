@@ -1,16 +1,6 @@
 #!/usr/bin/perl
 # simple RPM Repository cloning script
 
-# looks like some toxic ditribution polices for ill-driven distros like debian|ubuntu or less shitty like centos
-# make maintainers split std. perl (and python too) distribution to many-many packages, even meta packages like
-# perl-modules for ubuntu contain not full set of default perl source distribution' modules, so you have to install
-# some packages in order to work with this script
-#
-# for ubuntu: libjson-pp-perl, libfile-spec-perl, libxml-parser-perl, libio-compress-perl, liburi-perl
-# for slackware - everything is bundled with builtin perl :)
-
-# TODO: use another model of xml processing to use less memory
-
 use strict;
 use warnings "all";
 use Fcntl;

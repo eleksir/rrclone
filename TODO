@@ -6,7 +6,6 @@
 * добавить пример debian package
 * добавить slackbuild
 * добавить ebuild
-* добавить примеры crontab
 * добавить man page
 * добавить методики работы с https://packagecloud.io/ и сервисами подобными им (без автоиндекса)
 

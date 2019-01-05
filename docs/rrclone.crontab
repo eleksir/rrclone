@@ -1,0 +1,2 @@
+# run every sunday at 4.30 in the night
+30 4 * * 0 http://server/repo/packages/ /var/www/repo 1>/dev/null

@@ -15,6 +15,7 @@ use URI::URL;
 use Data::Dumper;
 use HTTP::Tiny;
 use IO::Socket::SSL; # implicit requirement in order to HTTP::Tiny work with https
+use Getopt::Long;
 
 sub mythread();
 sub dlfunc(@);
@@ -25,29 +26,31 @@ sub path_normalize_by_string_manipulation($);
 sub getfilenames($);
 sub noslash($);
 sub dbg($);
+sub version();
 
-help(0) unless (defined $ARGV[0]);
-help(1) unless (defined $ARGV[1]);
+my ($help, $verbose, $noclean, $version);
 
-help(0) if ($ARGV[0] eq '--help');
-help(0) if ($ARGV[0] eq '-h');
+GetOptions(
+	"help" => \$help,
+	"verbose" => \$verbose,
+	"noclean" => \$noclean,
+	"version" => \$version
+);
 
-my $noclean = 0;
+version() if ($version);
+help(0) if ($help);
+
 my $DEBUG = 0;
+$DEBUG = 1 if ($verbose);
+$noclean = 1 if ($noclean);
 
-if (defined($ARGV[0]) and $ARGV[0] eq '--noclean') {
-	$noclean = 1;
-}
+my $BASEURL = $ARGV[0] // '';
+my $BASEDIR = $ARGV[1] // '';
 
-my $BASEURL = $ARGV[0];
-my $BASEDIR = $ARGV[1];
+help(0) unless ($BASEURL);
+help(1) unless ($BASEDIR);
 
-if ($noclean == 1) {
-	help(1) unless (defined $ARGV[2]);
-	$BASEURL = $ARGV[1];
-	$BASEDIR = $ARGV[2];
-}
-
+# check if there is trailing slash at the end of url and path
 noslash($BASEURL);
 noslash($BASEDIR);
 
@@ -173,7 +176,7 @@ exit 0;
 sub help($) {
 	my $rc = shift;
 	my $help = <<'HELP';
-Usage: cr.pl [--noclean] http://source/url/ /destination/dir/
+Usage: rrclone.pl [--noclean] http://source/url/ /destination/dir/
 
 Where
 --noclean is optional argument, if it specified, no cleanup operation will
@@ -188,6 +191,11 @@ Destination is the folder where all files and metadata will be downloaded, if
 folder does not exist it will be created. Must contain trailng slash char.
 For example:
 /var/www/htdocs/repo/
+
+Other options:
+--help    - show this message
+--verbose - increases output verbosity
+--version - show version number and quit
 HELP
 
 	syswrite STDOUT, $help;
@@ -390,4 +398,8 @@ sub dbg($) {
 	}
 }
 
+sub version() {
+	syswrite STDOUT, "rrclone 1.1\n";
+	exit 0;
+}
 __END__

@@ -1,0 +1,41 @@
+.TH "RRCLONE" "1" "5 December 2019"
+.SH "NAME"
+rrclone \- RPM Repository Cloning tool
+.SH "SYNOPSIS"
+.B rrclone
+[\fI\,OPTION\/\fR]...
+SOURCE
+DESTINATION
+.SH "DESCRIPTION"
+.PP
+Copies all packages and metadata from remote repository to local folder.
+To guess package list it parses metadata. For now only XML metadata is supported.
+.SH "OPTIONS"
+.TP
+\fB\-\-help\fR
+show brief help message
+.TP
+\fB\-\-version\fR
+show version
+.TP
+\fB\-\-verbose\fR
+more verbose output
+.TP
+\fB\-\-noclean\fR
+do not clean packages that are missing in metadata
+.TP
+\fBSOURCE\fR
+is http(s) url that does not include repodata part.
+For example if full (index) metadata path is http://server/repo/Packages/repodata/repomd.xml
+then SOURCE will be http://server/repo/Packages/ with trailing slash.
+.TP
+\fBDESTINATION\fR
+full path to local directory, for example /var/www/repository/ with triling slash.
+.SH "AUTHOR"
+.TP
+Sergei Fedosoff <eleksir@gmail.com> aka eleksir <eleksir@exs-elm.ru>
+.SH "COPYRIGHT"
+Copyright © 2018 Sergei Fedosoff. License 2 clause BSD:
+https://directory.fsf.org/wiki?title=License:FreeBSD
+.SH "SEE ALSO"
+.B rpm (1).

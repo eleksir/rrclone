@@ -1,6 +1,6 @@
 # RPM Repositories Cloning tool
 
-1 to 1 rpm cloning tool
+1 to 1 rpm repository cloning tool
 
 ## Getting Started
 
@@ -21,9 +21,18 @@ in case of Slackware Linux everything is already shipped with single Perl
 package.
 
 ```
-apt install libjson-pp-perl, libfile-spec-perl, libxml-parser-perl, 
-libio-compress-perl, liburi-perl
+# apt install libjson-pp-perl libfile-spec-perl libxml-parser-perl \
+libio-compress-perl liburi-perl
 ```
+
+A correct path to repository. You need a string after "baseurl=" in repo-file
+(one that located in /etc/yum.repos.d, for example), it must end with trailng
+slash. If it does not, just add it.
+
+To check that url is correct you can try to download part of repository xml
+metadata. Put your string into browser address bar and add
+"repodata/repomd.xml" (no quotes) and if you see xml text then - vua-la! -
+your string is correct.
 
 ### Installing
 

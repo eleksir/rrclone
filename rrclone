@@ -1,6 +1,5 @@
 #!/usr/bin/perl
-# simple RPM Repository cloning script
-
+#
 use strict;
 use warnings "all";
 use Fcntl;
@@ -16,17 +15,21 @@ use Data::Dumper;
 use HTTP::Tiny;
 use IO::Socket::SSL; # implicit requirement in order to HTTP::Tiny work with https
 use Getopt::Long;
+use utf8;
 
 sub mythread();
 sub dlfunc(@);
 sub urlencode($);
 sub getmetadata();
 sub help($);
-sub path_normalize_by_string_manipulation($);
+sub path_normalize_by_string_manipulation ($);
 sub getfilenames($);
 sub noslash($);
 sub dbg($);
 sub version();
+
+binmode STDOUT, ':utf8';
+binmode STDERR, ':utf8';
 
 my ($help, $verbose, $noclean, $version);
 
@@ -55,7 +58,6 @@ noslash($BASEURL);
 noslash($BASEDIR);
 
 syswrite STDOUT, sprintf("Cloning %s to %s\n", $BASEURL, $BASEDIR);
-
 my @REPOFILES :shared;
 my @FILES;
 my @LINKS :shared;
@@ -67,55 +69,47 @@ my $fh = new IO::Zlib;
 my $xmldata = '';
 
 if ($fh->open($BASEDIR . $primaryxmlgz, "rb")) {
-
 	while (<$fh>) {
 		$xmldata .= $_;
 	}
 
 	$fh->close;
 } else {
-	syswrite STDERR, sprintf("An error has occured while reading %s.", $BASEDIR . 'repodata/primary.xml.gz');
+	syswrite STDERR, sprintf("An error has occured while reading %s.", $BASEDIR . "repodata/primary.xml.gz\n");
 	exit 1;
 }
 
-my $p1 = new XML::Parser(Style => 'Tree');
-my $ref = $p1->parse($xmldata);
-undef $xmldata;
-my @array = @{ $ref->[1] };
+my $package;
+my $location;
+my $size;
+my %list :shared;
+my $p = XML::Parser->new( Style => 'Stream' );
+$p->setHandlers (
+	Start   => sub {
+		my($parseinst, $element, %attributes) = @_;
+		$package = 1 if ($element eq 'package');
+		$location = $attributes{href} if ($element eq 'location');
+		$size = $attributes{package} if ($element eq 'size');
 
-for (my $i = 0; $i < @array; $i++) {
-
-	if (defined($array[$i]) and ($array[$i] eq 'package')) {
-		$i++;
-		my @array2 = @{ $array[$i] };
-		my $size = -1;
-		my $link;
-
-		for (my $j = 0; $j < @array2; $j++) {
-
-			if (defined($array2[$j]) and ($array2[$j] eq 'size')) {
-				$j++;
-				$size = $array2[$j][0]{'package'};
-			}
-
-			if (defined($array2[$j]) and ($array2[$j] eq 'location')) {
-				$j++;
-				$link = $array2[$j][0]{'href'};
-			}
-
+		if ($package and defined($size) and $location) {
+			$list{$location} = $size;
 		}
+	},
+	Char    => sub {},
+	End     => sub {
+		my($parseinst, $element, %attributes) = @_;
 
-		push @LINKS, $link;
-		push @SIZES, $size;
-
-		undef $size;
-		undef $link;
-		@array2 = -1;
+		if ($element eq 'package') {
+			$package = undef;
+			$location = undef;
+			$size = undef;
+		}
 	}
-}
+);
 
-@array = -1;
-undef $p1;
+$p->parse($xmldata);
+undef $xmldata;
+undef $p;
 
 for (my $i = 1; $i < 4; $i++) {
 	threads->create('mythread');
@@ -131,19 +125,18 @@ do {
 	}
 
 	# list of threads can be polled once per second, it delays consecutive polls by one second
-	sleep(3);
+	sleep(1);
 } while ($tcount > 0);
 
 undef $tcount;
 syswrite STDOUT, "Cloning done.\n";
-exit 0 if ($noclean == 1);
+exit 0 if (defined($noclean));
 
 syswrite STDOUT, sprintf("Cleaning old files in %s\n", $BASEDIR);
 
 my $searchpath = $BASEDIR;
 chop $searchpath;
 getfilenames($searchpath);
-my @filesToDelete;
 
 foreach my $fileOnDisk (@FILES) {
 	my $flag = 0;
@@ -156,17 +149,10 @@ foreach my $fileOnDisk (@FILES) {
 	}
 
 	if ($flag == 0) {
-		push @filesToDelete, $fileOnDisk;
-	}
-}
-
-
-while (@filesToDelete > 0) {
-	my $file = pop(@filesToDelete);
-
-	unless (-d $file) {
-		dbg("  - Unlinking $file");
-		unlink $file;
+		unless (-d $fileOnDisk) {
+			dbg("  - Unlinking $fileOnDisk");
+			unlink $fileOnDisk;
+		}
 	}
 }
 
@@ -207,30 +193,15 @@ sub mythread() {
 		my $size;
 		my $link;
 
-		if ($MUTEX == 0) {
-			$MUTEX = 1;
-			$size = pop(@SIZES);
-			$link = pop(@LINKS);
-			$MUTEX = 0;
-		} else {
-# pop from 2 arrays takes very small amount of time,
-# in practice we do not need this micro-sleep
-#			select(undef, undef, undef, 0.05);
-			next;
+		if ( 1 ) { # to properly remove lock
+			lock %list;
+			my @l = keys(%list);
+			last if (@l == 0);
+			$link = $l[0];
+			$size = delete($list{$link});
 		}
 
-		if (@LINKS > 0) {
-			if ((defined($size)) and (defined($link))) {
-				dlfunc($link, $size);
-			}
-		} else {
-# handle last package in list
-			if ((defined($size)) and (defined($link))) {
-				dlfunc($link, $size);
-			} else {
-				last;
-			}
-		}
+		dlfunc($link, $size);
 	}
 }
 
@@ -238,7 +209,7 @@ sub dlfunc(@) {
 	my $url = shift; # short (relative) URL without BASE part
 	my $size = shift;
 	my $wgetpath;
-	my $savepath = path_normalize_by_string_manipulation ($BASEDIR . $url);
+	my $savepath = path_normalize_by_string_manipulation($BASEDIR . $url);
 
 	if (substr($savepath, 0, length($BASEDIR)) ne $BASEDIR) {
 		syswrite STDERR, sprintf("Skipping package %s, because it out of destdir %s, looks like quirky metadata.\n", $savepath, $BASEDIR);
@@ -282,7 +253,6 @@ sub dlfunc(@) {
 	my $http = HTTP::Tiny->new();
 	$http->mirror($url, $savepath);
 	undef $http;
-
 	undef $savepath;
 	undef $url;
 }
@@ -296,46 +266,37 @@ sub urlencode($) {
 }
 
 sub getmetadata() {
+	my @metafiles;
 	dlfunc('repodata/repomd.xml', -1);
+	my $p = XML::Parser->new( Style => 'Stream' );
+	$p->setHandlers (
+		Start   => sub {
+			my($parseinst, $element, %attributes) = @_;
 
-	my $p1 = new XML::Parser(Style => 'Tree');
-	my $ref = $p1->parsefile($BASEDIR . 'repodata/repomd.xml');
-
-	#print Dumper $ref->[1][8][12][0]{'href'};
-	#  must be 'data'-------^
-	#  must be 'location'------^
-
-	my @array = @{ $ref->[1] };
-	my $primaryxmlgz;
-
-	for (my $i = 0; $i < @array; $i++) {
-
-		if (defined($array[$i]) and ($array[$i] eq 'data')){
-			$i++;
-			my @array2 = @{ $array[$i] };
-
-			for (my $j = 0; $j < @array2; $j++) {
-				if (defined($array2[$j]) and ($array2[$j] eq 'location')) {
-					$j++;
-					dlfunc($array2[$j][0]{'href'}, -1);
-
-					if ($array2[$j][0]{'href'} =~ /primary\.xml\.gz$/) {
-						$primaryxmlgz = $array2[$j][0]{'href'};
-					}
+			foreach (keys(%attributes)) {
+				if ($_ eq 'href') {
+					push @metafiles, $attributes{$_};
 				}
-
 			}
+		},
+		Char    => sub {},
+		End     => sub {}
+	);
 
-			@array2 = -1;
-		}
+	$p->parsefile($BASEDIR . 'repodata/repomd.xml');
 
+	foreach (@metafiles) {
+		dlfunc($_, -1);
 	}
 
-	@array = -1;
-	return $primaryxmlgz;
+	foreach (@metafiles) {
+		return $_ if ($_ =~ /primary\.xml\.gz$/);
+	}
+
+	die "No primary.xml metadata found.\n";
 }
 
-sub path_normalize_by_string_manipulation ($) {
+sub path_normalize_by_string_manipulation($) {
 	my $path = shift;
 
 	# canonpath does string manipulation, but does not remove "..".
@@ -369,15 +330,16 @@ sub getfilenames($) {
 
 	opendir (DIR, $path) or return "";
 	my @localfiles =
-	map { $path . '/' . $_ }
-	grep { !/^\.{1,2}$/ }
-	readdir (DIR);
+		map { $path . '/' . $_ }
+		grep { !/^\.{1,2}$/ }
+		readdir (DIR);
+
 	@FILES = (@FILES, @localfiles);
 
 	foreach (@localfiles) {
-		next if(-l $_);
+		next if (-l $_);
 
-		if(-d $_){
+		if (-d $_) {
 			getfilenames($_);
 		}
 	}
@@ -399,7 +361,8 @@ sub dbg($) {
 }
 
 sub version() {
-	syswrite STDOUT, "rrclone 1.1\n";
+	syswrite STDOUT, "rrclone 1.2\n";
 	exit 0;
 }
-__END__
+
+# vim: set ft=perl noet ai ts=4 sw=4 sts=4:

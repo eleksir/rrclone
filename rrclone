@@ -3,25 +3,31 @@
 use strict;
 use warnings "all";
 use Fcntl;
-use threads;
-use threads::shared;
 use File::Basename;
 use File::Path qw(make_path);
 use File::Spec;
 use XML::Parser;
 use IO::Zlib;
 use URI::URL;
-use Data::Dumper;
-use HTTP::Tiny;
-use IO::Socket::SSL; # implicit requirement in order to HTTP::Tiny work with https
+use AnyEvent::Loop;
+use AnyEvent::HTTP;
+use IO::Socket::SSL; # implicit requirement in order work with https
 use Getopt::Long;
 use utf8;
 
-sub mythread();
+# global vars
+my $done = AnyEvent->condvar;
+$AnyEvent::HTTP::MAX_PER_HOST = 4;
+$AnyEvent::HTTP::TIMEOUT = 10;
+my $batch = 0;
+my $batchflag = 0;
+my $savepath = '/dev/null';
+
 sub dlfunc(@);
 sub urlencode($);
 sub getmetadata();
 sub help($);
+sub download($$$); # borrowed directly from AnyEvent::HTTP docs
 sub path_normalize_by_string_manipulation ($);
 sub getfilenames($);
 sub noslash($);
@@ -58,11 +64,8 @@ noslash($BASEURL);
 noslash($BASEDIR);
 
 syswrite STDOUT, sprintf("Cloning %s to %s\n", $BASEURL, $BASEDIR);
-my @REPOFILES :shared;
+my @REPOFILES;
 my @FILES;
-my @LINKS :shared;
-my @SIZES :shared;
-my $MUTEX :shared = 0; # while $MUTEX = 1, noone picks links
 
 my $primaryxmlgz = getmetadata();
 my $fh = new IO::Zlib;
@@ -82,7 +85,7 @@ if ($fh->open($BASEDIR . $primaryxmlgz, "rb")) {
 my $package;
 my $location;
 my $size;
-my %list :shared;
+my %list;
 my $p = XML::Parser->new( Style => 'Stream' );
 $p->setHandlers (
 	Start   => sub {
@@ -111,24 +114,17 @@ $p->parse($xmldata);
 undef $xmldata;
 undef $p;
 
-for (my $i = 1; $i < 4; $i++) {
-	threads->create('mythread');
+$done = AnyEvent->condvar;
+$batch = scalar(keys(%list));
+
+for my $url (keys(%list)) {
+	dlfunc($url, $list{$url});
 }
 
-my $tcount = 0;
+if ($batchflag) {
+	$done->recv;
+}
 
-do {
-	$tcount = threads->list();
-
-	foreach my $thread (threads->list(threads::joinable)) {
-		$thread->join();
-	}
-
-	# list of threads can be polled once per second, it delays consecutive polls by one second
-	sleep(1);
-} while ($tcount > 0);
-
-undef $tcount;
 syswrite STDOUT, "Cloning done.\n";
 exit 0 if (defined($noclean));
 
@@ -167,6 +163,10 @@ Usage: rrclone.pl [--noclean] http://source/url/ /destination/dir/
 Where
 --noclean is optional argument, if it specified, no cleanup operation will
 be performed after rpm downloading complete.
+Note: because of new metadata arrives from repository old packages become
+"dead", so you cannot simply "yum downgrade" unless old packages are saved
+in yum cache. In order to make old packages "live" if --noclean given you
+should run createrepo or createrepo_c command to re-generate metadata.
 
 Source must be http(s) url which trimmed at repodata folder. If full url is
 http://mirror.yandex.ru/centos/7.4.1708/os/x86_64/repodata/repomd.xml
@@ -188,27 +188,77 @@ HELP
 	exit $rc;
 }
 
-sub mythread() {
-	while ( 1 ) {
-		my $size;
-		my $link;
+sub download($$$) {
+	my ($url, $file, $cb) = @_;
+	open my $fh, "+>", $file or die "$file: $!";
 
-		if ( 1 ) { # to properly remove lock
-			lock %list;
-			my @l = keys(%list);
-			last if (@l == 0);
-			$link = $l[0];
-			$size = delete($list{$link});
+	my %hdr;
+	my $ofs = 0;
+
+	if (stat $fh and -s _) {
+		$ofs = -s _;
+		warn "-s is ", $ofs;
+		$hdr{"if-unmodified-since"} = AnyEvent::HTTP::format_date +(stat _)[9];
+		$hdr{"range"} = "bytes=$ofs-";
+	}
+
+	http_get $url,
+	headers   => \%hdr,
+	on_header => sub {
+		my ($hdr) = @_;
+
+		if ($hdr->{Status} == 200 && $ofs) {
+			# resume failed
+			truncate $fh, $ofs = 0;
 		}
 
-		dlfunc($link, $size);
+		sysseek $fh, $ofs, 0;
+
+		1
+	},
+	on_body   => sub {
+		my ($data, $hdr) = @_;
+
+		if ($hdr->{Status} =~ /^2/) {
+			length $data == syswrite $fh, $data
+				or return; # abort on write errors
+		}
+
+		1
+	},
+	sub {
+		my (undef, $hdr) = @_;
+		my $status = $hdr->{Status};
+
+		if (my $time = AnyEvent::HTTP::parse_date $hdr->{"last-modified"}) {
+			utime $time, $time, $fh;
+		}
+
+		if ($status == 200 || $status == 206 || $status == 416) {
+			# download ok || resume ok || file already fully downloaded
+			$cb->(1, $hdr);
+
+		} elsif ($status == 412) {
+			# file has changed while resuming, delete and retry
+			unlink $file;
+			$cb->(0, $hdr);
+
+		} elsif ($status == 500 or $status == 503 or $status =~ /^59/) {
+			# retry later
+			syswrite STDERR, "Unable to download $url. Server returns 5xx http status code.\n";
+			$cb->(0, $hdr);
+
+		} else {
+			syswrite STDERR, "Unable to download $url.\n";
+			$cb->(undef, $hdr);
+		}
 	}
+	;
 }
 
 sub dlfunc(@) {
 	my $url = shift; # short (relative) URL without BASE part
 	my $size = shift;
-	my $wgetpath;
 	my $savepath = path_normalize_by_string_manipulation($BASEDIR . $url);
 
 	if (substr($savepath, 0, length($BASEDIR)) ne $BASEDIR) {
@@ -220,18 +270,18 @@ sub dlfunc(@) {
 
 	# do not re-download already downloaded rpm packages
 	unless ($size == -1) {
-
 		if (-f $savepath) {
 			my $filesize = (stat($savepath))[7];
 
 			if ($size == $filesize) {
-				dbg("  * Skip $savepath file already exists and on-disk and in-repo sizes are match.");
+				dbg("  * Skip $savepath - file already exists and on-disk and in-repo sizes are match");
+				$batch--;
 				return;
 			} else {
-				dbg("  + Downloading $savepath file exists but on-disk and in-repo sizes are mismatch. $filesize vs $size.")
+				dbg("  + Queue download of $savepath - file exists but on-disk and in-repo sizes are mismatch - $filesize vs $size")
 			}
 		} else {
-			dbg("  + Downloading $savepath");
+			dbg("  + Queue download of $savepath");
 		}
 
 	}
@@ -249,10 +299,21 @@ sub dlfunc(@) {
 
 	$url = $BASEURL . $url;
 	$url = urlencode($url);
+	$batchflag = 1 if ($batchflag == 0);
 
-	my $http = HTTP::Tiny->new();
-	$http->mirror($url, $savepath);
-	undef $http;
+	download ($url, $savepath, sub {
+		if ($_[0]) {
+			#syswrite STDERR, "$url downloaded.\n";
+		} elsif (defined $_[0]) {
+			#syswrite STDERR, "Unable to download $url.\n";
+		} else {
+			#syswrite STDERR, "Unable to download $url. Server returns 5xx http status code.\n";
+		}
+
+		$batch--;
+		$done->send if $batch == 0;
+	});
+
 	undef $savepath;
 	undef $url;
 }
@@ -267,7 +328,14 @@ sub urlencode($) {
 
 sub getmetadata() {
 	my @metafiles;
+	$batch = 1;
 	dlfunc('repodata/repomd.xml', -1);
+
+	if ($batchflag) {
+		$done->recv;
+		$batchflag = 0;
+	}
+
 	my $p = XML::Parser->new( Style => 'Stream' );
 	$p->setHandlers (
 		Start   => sub {
@@ -285,8 +353,18 @@ sub getmetadata() {
 
 	$p->parsefile($BASEDIR . 'repodata/repomd.xml');
 
+	$done = AnyEvent->condvar;
+	$batch = scalar(@metafiles);
+
+	die "Incorrect metadata in repository\n" if ($batch < 1);
+
 	foreach (@metafiles) {
 		dlfunc($_, -1);
+	}
+
+	if ($batchflag) {
+		$done->recv;
+		$batchflag = 0;
 	}
 
 	foreach (@metafiles) {
